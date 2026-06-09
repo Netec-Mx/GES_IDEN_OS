@@ -19,47 +19,54 @@ Cada uno de estos laboratorios está diseñado para ofrecerte una experiencia pr
 
 ### Capítulo 2
 
-### [Diseñar un flujo de aprovisionamiento y reconciliación](Capitulo02/README.md#diseñar-un-flujo-de-aprovisionamiento-y-reconciliación)
+### [Práctica 1: Diseñar un flujo de aprovisionamiento y reconciliación](Capitulo02/README.md#diseñar-un-flujo-de-aprovisionamiento-y-reconciliación)
   - Descripción: Diseñar un flujo de aprovisionamiento y reconciliación alineado con la gestión del ciclo de vida de identidades, sincronización de repositorios y políticas de provisión.
-  - Duración estimada: 30 min
+  - ⏱️Duración estimada: 30 min
     
 ---
 
 ### Capítulo 3
 
-### [Definir reglas de sincronización y reconciliación](Capitulo03/README.md#definir-reglas-de-sincronización-y-reconciliación)
+### [Práctica 2: Definir reglas de sincronización y reconciliación](Capitulo03/README.md#definir-reglas-de-sincronización-y-reconciliación)
+
   - Descripción: Aplicar criterios de sincronización, reconciliación y resolución de conflictos entre LDAP y Active Directory mediante la definición de reglas operativas.
-  - Duración estimada: 31 min
+  - ⏱️Duración estimada: 31 min
     
 ---
 
 ### Capítulo 4
 
-### [Configurar SSO con Keycloak y una app cliente](Capitulo04/README.md#configurar-sso-con-keycloak-y-una-app-cliente)
+### [Práctica 3: Configurar SSO con Keycloak y una app cliente](Capitulo04/README.md#configurar-sso-con-keycloak-y-una-app-cliente)
+
   - Descripción: Implementar un escenario de autenticación federada configurando SSO con Keycloak y una aplicación cliente utilizando estándares modernos de identidad.
-  - Duración estimada: 31 min
+  - ⏱️Duración estimada: 31 min
 
 ---
 
 ### Capítulo 5
 
-### [Asignación de roles y revisión de accesos en una herramienta IAM](Capitulo05/README.md#asignación-de-roles-y-revisión-de-accesos-en-una-herramienta-iam)
+### [Demostración: Asignación de roles y revisión de accesos en una herramienta IAM](Capitulo05/README.md#asignación-de-roles-y-revisión-de-accesos-en-una-herramienta-iam)
+
   - Descripción: Aplicar modelos RBAC mediante la asignación de roles, revisión de accesos y validación de cumplimiento dentro de una herramienta IAM.
-  - Duración estimada: 25 min
+  - ⏱️Duración estimada: 25 min
+    
+---
 
 ### Capítulo 6
 
-### [Integración de una herramienta IAM con un repositorio de identidad](Capitulo06/README.md#integración-de-una-herramienta-iam-con-un-repositorio-de-identidad)
+### [Demostración: Integración de una herramienta IAM con un repositorio de identidad](Capitulo06/README.md#integración-de-una-herramienta-iam-con-un-repositorio-de-identidad)
+
   - Descripción: Realizar la integración de una plataforma IAM con un repositorio de identidad para validar conectores, aprovisionamiento y reconciliación.
-  - Duración estimada: 31 min
+  -⏱️ Duración estimada: 31 min
     
 ---
 
 ### Capítulo 7
 
-### [Escenario de acceso cloud/híbrido con identidad federada](Capitulo07/README.md#escenario-de-acceso-cloudhíbrido-con-identidad-federada)
+### [Demostración: Escenario de acceso cloud/híbrido con identidad federada](Capitulo07/README.md#escenario-de-acceso-cloudhíbrido-con-identidad-federada)
+
   - Descripción: Crear un escenario híbrido de acceso federado que integre controles cloud IAM, políticas BYOD y requerimientos de auditoría y cumplimiento.
-  - Duración estimada: 25 min
+  - ⏱️Duración estimada: 25 min
     
 ---
 ## 📬 **Contacto y más información**
