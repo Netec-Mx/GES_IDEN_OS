@@ -19,7 +19,7 @@ Cada uno de estos laboratorios está diseñado para ofrecerte una experiencia pr
 
 ### Capítulo 2
 
-- [Diseñar un flujo de aprovisionamiento y reconciliación](Capitulo02/README.md#diseñar-un-flujo-de-aprovisionamiento-y-reconciliación)
+### [Diseñar un flujo de aprovisionamiento y reconciliación](Capitulo02/README.md#diseñar-un-flujo-de-aprovisionamiento-y-reconciliación)
   - Descripción: Diseñar un flujo de aprovisionamiento y reconciliación alineado con la gestión del ciclo de vida de identidades, sincronización de repositorios y políticas de provisión.
   - Duración estimada: 30 min
     
