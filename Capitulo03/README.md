@@ -1,1358 +1,966 @@
-# Definir reglas de sincronización y reconciliación
+# Laboratorio 3.4: Definir reglas de sincronización y reconciliación entre LDAP y Active Directory
 
-## 1. Metadatos
+## Objetivo de la práctica
 
-| Campo            | Valor                                      |
-|------------------|--------------------------------------------|
-| **Duración**     | 31 minutos                                 |
-| **Complejidad**  | Alta                                       |
-| **Nivel Bloom**  | Aplicar                                    |
-| **Módulo**       | 3 — Sincronización y Reconciliación        |
-| **Tecnologías**  | MidPoint 4.8 LTS, OpenLDAP 2.6, ppolicy, Apache Directory Studio, Docker Compose, OpenSSL |
+Al finalizar la práctica, serás capaz de:
 
----
-
-## 2. Descripción General
-
-Este laboratorio simula un escenario empresarial real donde dos directorios LDAP —**LDAP-A** (directorio corporativo principal) y **LDAP-B** (directorio de una subsidiaria)— deben mantenerse sincronizados a través de **MidPoint 4.8 LTS** como motor de aprovisionamiento. El estudiante configurará reglas de correlación por atributo `mail`, definirá mappings de transformación para normalizar diferencias de esquema entre ambos directorios (por ejemplo, `displayName` en LDAP-A vs `cn` en LDAP-B), y establecerá políticas de resolución de conflictos. Adicionalmente, se aplicarán políticas de contraseñas mediante el overlay `ppolicy` y medidas de hardening (ACLs restrictivas, deshabilitación de acceso anónimo, TLS) en ambas instancias OpenLDAP.
+- Comprender cómo se relacionan LDAP y Active Directory como servicios de directorio.
+- Identificar diferencias de esquema entre LDAP y Active Directory.
+- Definir reglas de sincronización entre atributos equivalentes.
+- Detectar conflictos de datos entre dos repositorios.
+- Aplicar reglas de reconciliación según una política YAML.
+- Revisar controles básicos de hardening y políticas de contraseñas.
+- Generar un reporte con acciones recomendadas de sincronización, reconciliación y seguridad.
 
 ---
 
-## 3. Objetivos de Aprendizaje
+## Objetivo visual
 
-Al completar este laboratorio, el estudiante será capaz de:
+Representar el flujo de comparación entre un directorio LDAP y un Active Directory simulado, aplicando reglas de sincronización y controles básicos de seguridad.
 
-- [ ] Configurar reglas de sincronización bidireccional entre dos instancias OpenLDAP con diferentes esquemas de atributos usando MidPoint 4.8.
-- [ ] Implementar políticas de resolución de conflictos para escenarios de datos inconsistentes entre directorios.
-- [ ] Aplicar políticas de contraseñas y medidas de hardening en OpenLDAP usando el overlay `ppolicy` y ACLs restrictivas.
-- [ ] Validar el comportamiento de la sincronización ante escenarios de conflicto mediante pruebas controladas.
+![Definir Reglas](../images/Capitulo3/diagrama34.png)
 
----
+Resultado:
+- Usuarios solo en LDAP
+- Usuarios solo en Active Directory
+- Usuarios sincronizados
+- Conflictos de datos
+- Alertas de seguridad
+- Plan de acciones
 
-## 4. Prerequisitos
 
-### Conocimiento Previo
-- Haber completado el Lab 1 (02-00-01) o tener experiencia equivalente con MidPoint y OpenLDAP.
-- Comprensión de la estructura DIT, DNs, atributos y esquemas LDAP (`inetOrgPerson`, `posixAccount`).
-- Familiaridad con los conceptos de sincronización, reconciliación y resolución de conflictos del Módulo 3.
-- Conocimiento básico de Docker Compose y edición de archivos YAML/XML.
+## Duración aproximada
 
-### Acceso y Herramientas
-- Docker Engine 24.x+ y Docker Compose 2.20.x+ instalados y operativos.
-- Apache Directory Studio 2.0.x instalado en el equipo anfitrión.
-- Acceso a Internet para descarga de imágenes Docker (si no están en caché local).
-- Mínimo 8 GB RAM disponibles para este laboratorio (MidPoint + 2× OpenLDAP + PostgreSQL).
-- Repositorio del curso clonado localmente con los scripts de datos ficticios.
+**31 minutos**
 
----
+## Tabla de ayuda
 
-## 5. Entorno del Laboratorio
-
-### Tabla de Recursos de Software
-
-| Componente        | Imagen / Versión                        | Puerto(s) expuesto(s) | Rol                          |
-|-------------------|-----------------------------------------|-----------------------|------------------------------|
-| MidPoint          | `evolveum/midpoint:4.8`                 | 8080                  | Motor de sincronización IAM  |
-| PostgreSQL        | `postgres:15`                           | 5432                  | Base de datos de MidPoint    |
-| OpenLDAP-A        | `osixia/openldap:1.5.0`                 | 1389 / 1636           | Directorio corporativo (A)   |
-| OpenLDAP-B        | `osixia/openldap:1.5.0`                 | 2389 / 2636           | Directorio subsidiaria (B)   |
-| Apache Dir Studio | (instalación local)                     | N/A                   | Cliente LDAP gráfico         |
-
-### Tabla de Credenciales de Laboratorio (Ficticias)
-
-| Servicio     | Usuario / DN                            | Contraseña          |
-|--------------|-----------------------------------------|---------------------|
-| MidPoint     | `administrator`                         | `5ecr3t`            |
-| LDAP-A admin | `cn=admin,dc=corporativo,dc=lab`        | `AdminCorpA2024!`   |
-| LDAP-B admin | `cn=admin,dc=subsidiaria,dc=lab`        | `AdminSubB2024!`    |
-| PostgreSQL   | `midpoint`                              | `midpoint`          |
-
-> ⚠️ **Nota de seguridad:** Todas las credenciales son ficticias y exclusivas para este entorno de laboratorio aislado. Nunca reutilizar en entornos productivos.
-
-### Preparación del Entorno — Comandos de Configuración Inicial
-
-**Paso 0.1 — Crear la estructura de directorios del laboratorio:**
-
-```bash
-mkdir -p ~/lab-03-00-01/{ldap-a,ldap-b,midpoint,certs,ldif}
-cd ~/lab-03-00-01
-```
-
-**Paso 0.2 — Generar certificados TLS autofirmados para ambas instancias LDAP:**
-
-```bash
-# Certificado para LDAP-A
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout certs/ldap-a.key \
-  -out certs/ldap-a.crt \
-  -subj "/CN=ldap-a/O=Corporativo Lab/C=CO" \
-  -addext "subjectAltName=DNS:ldap-a,IP:127.0.0.1"
-
-# Certificado para LDAP-B
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout certs/ldap-b.key \
-  -out certs/ldap-b.crt \
-  -subj "/CN=ldap-b/O=Subsidiaria Lab/C=CO" \
-  -addext "subjectAltName=DNS:ldap-b,IP:127.0.0.1"
-
-chmod 600 certs/*.key
-```
-
-**Paso 0.3 — Crear el archivo `docker-compose.yml`:**
-
-```bash
-cat > docker-compose.yml << 'EOF'
-version: "3.9"
-
-networks:
-  iam-net:
-    driver: bridge
-
-volumes:
-  pg-data:
-  ldap-a-data:
-  ldap-a-config:
-  ldap-b-data:
-  ldap-b-config:
-  midpoint-home:
-
-services:
-
-  # ── PostgreSQL para MidPoint ──────────────────────────────────
-  postgres:
-    image: postgres:15
-    container_name: mp-postgres
-    environment:
-      POSTGRES_DB: midpoint
-      POSTGRES_USER: midpoint
-      POSTGRES_PASSWORD: midpoint
-    volumes:
-      - pg-data:/var/lib/postgresql/data
-    networks:
-      - iam-net
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U midpoint"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ── OpenLDAP-A (Directorio Corporativo) ──────────────────────
-  ldap-a:
-    image: osixia/openldap:1.5.0
-    container_name: ldap-a
-    hostname: ldap-a
-    environment:
-      LDAP_ORGANISATION: "Corporativo Lab"
-      LDAP_DOMAIN: "corporativo.lab"
-      LDAP_ADMIN_PASSWORD: "AdminCorpA2024!"
-      LDAP_TLS: "true"
-      LDAP_TLS_CRT_FILENAME: "ldap-a.crt"
-      LDAP_TLS_KEY_FILENAME: "ldap-a.key"
-      LDAP_TLS_CA_CRT_FILENAME: "ldap-a.crt"
-      LDAP_TLS_VERIFY_CLIENT: "never"
-      LDAP_REMOVE_CONFIG_AFTER_SETUP: "false"
-    volumes:
-      - ldap-a-data:/var/lib/ldap
-      - ldap-a-config:/etc/ldap/slapd.d
-      - ./certs/ldap-a.crt:/container/service/slapd/assets/certs/ldap-a.crt:ro
-      - ./certs/ldap-a.key:/container/service/slapd/assets/certs/ldap-a.key:ro
-    ports:
-      - "1389:389"
-      - "1636:636"
-    networks:
-      - iam-net
-
-  # ── OpenLDAP-B (Directorio Subsidiaria) ──────────────────────
-  ldap-b:
-    image: osixia/openldap:1.5.0
-    container_name: ldap-b
-    hostname: ldap-b
-    environment:
-      LDAP_ORGANISATION: "Subsidiaria Lab"
-      LDAP_DOMAIN: "subsidiaria.lab"
-      LDAP_ADMIN_PASSWORD: "AdminSubB2024!"
-      LDAP_TLS: "true"
-      LDAP_TLS_CRT_FILENAME: "ldap-b.crt"
-      LDAP_TLS_KEY_FILENAME: "ldap-b.key"
-      LDAP_TLS_CA_CRT_FILENAME: "ldap-b.crt"
-      LDAP_TLS_VERIFY_CLIENT: "never"
-      LDAP_REMOVE_CONFIG_AFTER_SETUP: "false"
-    volumes:
-      - ldap-b-data:/var/lib/ldap
-      - ldap-b-config:/etc/ldap/slapd.d
-      - ./certs/ldap-b.crt:/container/service/slapd/assets/certs/ldap-b.crt:ro
-      - ./certs/ldap-b.key:/container/service/slapd/assets/certs/ldap-b.key:ro
-    ports:
-      - "2389:389"
-      - "2636:636"
-    networks:
-      - iam-net
-
-  # ── MidPoint 4.8 ─────────────────────────────────────────────
-  midpoint:
-    image: evolveum/midpoint:4.8
-    container_name: midpoint
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      MP_SET_midpoint_repository_jdbcUrl: "jdbc:postgresql://postgres/midpoint"
-      MP_SET_midpoint_repository_jdbcUsername: "midpoint"
-      MP_SET_midpoint_repository_jdbcPassword: "midpoint"
-      MP_SET_midpoint_repository_database: "postgresql"
-      MP_UNSET_midpoint_repository_hibernateHbm2ddl: ""
-    volumes:
-      - midpoint-home:/opt/midpoint/var
-    ports:
-      - "8080:8080"
-    networks:
-      - iam-net
-EOF
-```
-
-**Paso 0.4 — Iniciar el entorno:**
-
-```bash
-docker compose up -d
-# Esperar ~90 segundos para que MidPoint inicialice completamente
-docker compose logs -f midpoint | grep -m1 "MidPoint started"
-```
-
-**Salida esperada:**
-```
-midpoint  | ... MidPoint started (build ...). Initialization complete.
-```
+| Elemento | Descripción |
+|--------|------------|
+| Plataforma | Windows Server en máquina virtual de Azure |
+| Terminal | Windows PowerShell |
+| Lenguaje | Python 3.12 |
+| Archivos de datos | CSV |
+| Archivo de reglas | YAML |
+| Librerías | PyYAML, tabulate |
+| Tema principal | Servicios de directorio y sincronización |
+| Servicios simulados | LDAP Corporativo y Active Directory |
+| Tipo de práctica | Sincronización, reconciliación, conflictos y hardening básico |
 
 ---
 
-## 6. Procedimiento Paso a Paso
+## Instrucciones
 
 ---
 
-### Paso 1 — Poblar los directorios LDAP con datos ficticios y esquemas diferenciados
+### Tarea 1. Comprender el escenario del laboratorio
 
-**Objetivo:** Crear la estructura DIT en LDAP-A y LDAP-B con usuarios ficticios que representen diferencias de esquema reales: LDAP-A usará `displayName` como atributo descriptivo principal, mientras que LDAP-B usará `cn` con formato diferente.
+En esta práctica trabajarás con una empresa ficticia llamada **GlobalCorp**.
 
-#### Instrucciones
+GlobalCorp tiene dos servicios de directorio:
 
-**1.1 — Crear el LDIF de estructura y usuarios para LDAP-A:**
+| Directorio | Archivo usado | Rol |
+|----------|---------------|-----|
+| LDAP Corporativo | `ldap_directory.csv` | Directorio usado por aplicaciones internas |
+| Active Directory | `active_directory.csv` | Directorio principal corporativo |
 
-```bash
-cat > ldif/ldap-a-init.ldif << 'EOF'
-# ── Unidades Organizativas ──────────────────────────────────────
-dn: ou=Personas,dc=corporativo,dc=lab
-objectClass: organizationalUnit
-ou: Personas
+Ambos directorios almacenan usuarios, pero no usan exactamente los mismos nombres de atributos.
 
-dn: ou=Grupos,dc=corporativo,dc=lab
-objectClass: organizationalUnit
-ou: Grupos
+| Concepto | LDAP | Active Directory |
+|--------|------|------------------|
+| Usuario/login | `uid` | `sAMAccountName` |
+| Nombre visible | `cn` | `displayName` |
+| Correo | `mail` | `mail` |
+| Departamento | `departmentNumber` | `department` |
+| Tipo de empleado | `employeeType` | `employeeType` |
+| Estado de cuenta | `accountStatus` | `enabled` |
 
-# ── Usuarios ficticios (esquema con displayName) ────────────────
-dn: uid=amartinez,ou=Personas,dc=corporativo,dc=lab
-objectClass: inetOrgPerson
-objectClass: organizationalPerson
-objectClass: person
-uid: amartinez
-cn: Andrea Martinez
-sn: Martinez
-givenName: Andrea
-displayName: Andrea Martinez (Corp)
-mail: amartinez@corporativo.lab
-userPassword: {SSHA}TempPass2024Corp!
-
-dn: uid=clopez,ou=Personas,dc=corporativo,dc=lab
-objectClass: inetOrgPerson
-objectClass: organizationalPerson
-objectClass: person
-uid: clopez
-cn: Carlos Lopez
-sn: Lopez
-givenName: Carlos
-displayName: Carlos Lopez (Corp)
-mail: clopez@corporativo.lab
-userPassword: {SSHA}TempPass2024Corp!
-
-dn: uid=lrodriguez,ou=Personas,dc=corporativo,dc=lab
-objectClass: inetOrgPerson
-objectClass: organizationalPerson
-objectClass: person
-uid: lrodriguez
-cn: Laura Rodriguez
-sn: Rodriguez
-givenName: Laura
-displayName: Laura Rodriguez (Corp)
-mail: lrodriguez@corporativo.lab
-userPassword: {SSHA}TempPass2024Corp!
-EOF
-```
-
-**1.2 — Cargar el LDIF en LDAP-A:**
-
-```bash
-ldapadd -H ldap://localhost:1389 \
-  -D "cn=admin,dc=corporativo,dc=lab" \
-  -w "AdminCorpA2024!" \
-  -f ldif/ldap-a-init.ldif
-```
-
-**1.3 — Crear el LDIF para LDAP-B (esquema diferente: sin `displayName`, `cn` con formato distinto):**
-
-```bash
-cat > ldif/ldap-b-init.ldif << 'EOF'
-# ── Unidades Organizativas ──────────────────────────────────────
-dn: ou=Empleados,dc=subsidiaria,dc=lab
-objectClass: organizationalUnit
-ou: Empleados
-
-dn: ou=Equipos,dc=subsidiaria,dc=lab
-objectClass: organizationalUnit
-ou: Equipos
-
-# ── Usuarios ficticios (esquema sin displayName, cn diferente) ──
-dn: uid=amartinez,ou=Empleados,dc=subsidiaria,dc=lab
-objectClass: inetOrgPerson
-objectClass: organizationalPerson
-objectClass: person
-uid: amartinez
-cn: MARTINEZ, Andrea
-sn: Martinez
-givenName: Andrea
-mail: amartinez@corporativo.lab
-userPassword: {SSHA}TempPass2024Sub!
-
-dn: uid=clopez,ou=Empleados,dc=subsidiaria,dc=lab
-objectClass: inetOrgPerson
-objectClass: organizationalPerson
-objectClass: person
-uid: clopez
-cn: LOPEZ, Carlos
-sn: Lopez
-givenName: Carlos
-mail: clopez@corporativo.lab
-userPassword: {SSHA}TempPass2024Sub!
-
-# Nota: lrodriguez NO existe en LDAP-B (para probar aprovisionamiento)
-# Usuario nuevo solo en subsidiaria (para probar reconciliación inversa)
-dn: uid=ptorres,ou=Empleados,dc=subsidiaria,dc=lab
-objectClass: inetOrgPerson
-objectClass: organizationalPerson
-objectClass: person
-uid: ptorres
-cn: TORRES, Pedro
-sn: Torres
-givenName: Pedro
-mail: ptorres@corporativo.lab
-userPassword: {SSHA}TempPass2024Sub!
-EOF
-```
-
-**1.4 — Cargar el LDIF en LDAP-B:**
-
-```bash
-ldapadd -H ldap://localhost:2389 \
-  -D "cn=admin,dc=subsidiaria,dc=lab" \
-  -w "AdminSubB2024!" \
-  -f ldif/ldap-b-init.ldif
-```
-
-#### Salida Esperada
-```
-adding new entry "ou=Personas,dc=corporativo,dc=lab"
-adding new entry "ou=Grupos,dc=corporativo,dc=lab"
-adding new entry "uid=amartinez,ou=Personas,dc=corporativo,dc=lab"
-adding new entry "uid=clopez,ou=Personas,dc=corporativo,dc=lab"
-adding new entry "uid=lrodriguez,ou=Personas,dc=corporativo,dc=lab"
-```
-*(Similar para LDAP-B con los DNs de subsidiaria)*
-
-#### Verificación
-
-```bash
-# Verificar usuarios en LDAP-A
-ldapsearch -H ldap://localhost:1389 \
-  -D "cn=admin,dc=corporativo,dc=lab" -w "AdminCorpA2024!" \
-  -b "ou=Personas,dc=corporativo,dc=lab" "(objectClass=inetOrgPerson)" \
-  uid mail displayName | grep -E "^(uid|mail|displayName):"
-
-# Verificar usuarios en LDAP-B
-ldapsearch -H ldap://localhost:2389 \
-  -D "cn=admin,dc=subsidiaria,dc=lab" -w "AdminSubB2024!" \
-  -b "ou=Empleados,dc=subsidiaria,dc=lab" "(objectClass=inetOrgPerson)" \
-  uid mail cn | grep -E "^(uid|mail|cn):"
-```
-
-**Resultado esperado LDAP-A:** 3 usuarios con atributo `displayName` en formato `"Nombre Apellido (Corp)"`.  
-**Resultado esperado LDAP-B:** 3 usuarios con `cn` en formato `"APELLIDO, Nombre"` y sin `displayName`.
+El objetivo es definir reglas que permitan comparar ambos repositorios, detectar diferencias y decidir qué acción tomar.
 
 ---
 
-### Paso 2 — Configurar el overlay ppolicy y hardening en OpenLDAP-A
+#### ¿Sabías que…?
+**Concepto: Servicio de directorio**
 
-**Objetivo:** Aplicar políticas de contraseñas (longitud mínima, complejidad, historial) mediante el overlay `ppolicy`, deshabilitar el acceso anónimo y configurar ACLs restrictivas siguiendo las buenas prácticas de hardening del Módulo 3.
+Un servicio de directorio permite almacenar, organizar y consultar identidades, grupos, atributos y recursos de una organización.
 
-#### Instrucciones
-
-**2.1 — Acceder al contenedor LDAP-A:**
-
-```bash
-docker exec -it ldap-a bash
-```
-
-**2.2 — Cargar el módulo ppolicy (dentro del contenedor):**
-
-```bash
-cat > /tmp/load-ppolicy.ldif << 'EOF'
-dn: cn=module,cn=config
-changetype: modify
-add: olcModuleLoad
-olcModuleLoad: ppolicy
-EOF
-
-ldapadd -Y EXTERNAL -H ldapi:/// -f /tmp/load-ppolicy.ldif
-```
-
-**2.3 — Agregar el overlay ppolicy a la base de datos (dentro del contenedor):**
-
-```bash
-cat > /tmp/ppolicy-overlay.ldif << 'EOF'
-dn: olcOverlay=ppolicy,olcDatabase={1}mdb,cn=config
-objectClass: olcOverlayConfig
-objectClass: olcPPolicyConfig
-olcOverlay: ppolicy
-olcPPolicyDefault: cn=PoliticaDefault,ou=Politicas,dc=corporativo,dc=lab
-olcPPolicyHashCleartext: TRUE
-olcPPolicyUseLockout: TRUE
-EOF
-
-ldapadd -Y EXTERNAL -H ldapi:/// -f /tmp/ppolicy-overlay.ldif
-```
-
-**2.4 — Crear la OU de políticas y la política por defecto (dentro del contenedor):**
-
-```bash
-cat > /tmp/create-policy.ldif << 'EOF'
-dn: ou=Politicas,dc=corporativo,dc=lab
-objectClass: organizationalUnit
-ou: Politicas
-
-dn: cn=PoliticaDefault,ou=Politicas,dc=corporativo,dc=lab
-objectClass: pwdPolicy
-objectClass: person
-cn: PoliticaDefault
-sn: PoliticaDefault
-pwdAttribute: userPassword
-pwdMinLength: 10
-pwdMaxAge: 7776000
-pwdInHistory: 5
-pwdMaxFailure: 5
-pwdLockout: TRUE
-pwdLockoutDuration: 300
-pwdMustChange: FALSE
-pwdAllowUserChange: TRUE
-pwdExpireWarning: 604800
-pwdGraceAuthNLimit: 0
-EOF
-
-ldapadd -H ldap://localhost \
-  -D "cn=admin,dc=corporativo,dc=lab" \
-  -w "AdminCorpA2024!" \
-  -f /tmp/create-policy.ldif
-```
-
-**2.5 — Configurar ACLs restrictivas (deshabilitar acceso anónimo) dentro del contenedor:**
-
-```bash
-cat > /tmp/acl-hardening.ldif << 'EOF'
-dn: olcDatabase={1}mdb,cn=config
-changetype: modify
-replace: olcAccess
-olcAccess: {0}to attrs=userPassword
-  by self write
-  by dn="cn=admin,dc=corporativo,dc=lab" write
-  by dn="cn=midpoint-svc,ou=Personas,dc=corporativo,dc=lab" read
-  by anonymous auth
-  by * none
-olcAccess: {1}to attrs=shadowLastChange
-  by self write
-  by * read
-olcAccess: {2}to *
-  by dn="cn=admin,dc=corporativo,dc=lab" write
-  by dn="cn=midpoint-svc,ou=Personas,dc=corporativo,dc=lab" read
-  by self read
-  by anonymous none
-EOF
-
-ldapmodify -Y EXTERNAL -H ldapi:/// -f /tmp/acl-hardening.ldif
-```
-
-**2.6 — Crear cuenta de servicio para MidPoint (dentro del contenedor):**
-
-```bash
-cat > /tmp/midpoint-svc.ldif << 'EOF'
-dn: cn=midpoint-svc,ou=Personas,dc=corporativo,dc=lab
-objectClass: inetOrgPerson
-objectClass: organizationalPerson
-objectClass: person
-cn: midpoint-svc
-sn: ServiceAccount
-uid: midpoint-svc
-mail: midpoint-svc@corporativo.lab
-userPassword: MidpointSvc2024!
-EOF
-
-ldapadd -H ldap://localhost \
-  -D "cn=admin,dc=corporativo,dc=lab" \
-  -w "AdminCorpA2024!" \
-  -f /tmp/midpoint-svc.ldif
-```
-
-**2.7 — Salir del contenedor:**
-
-```bash
-exit
-```
-
-#### Salida Esperada
-```
-modifying entry "olcDatabase={1}mdb,cn=config"
-adding new entry "ou=Politicas,dc=corporativo,dc=lab"
-adding new entry "cn=PoliticaDefault,ou=Politicas,dc=corporativo,dc=lab"
-```
-
-#### Verificación
-
-```bash
-# Verificar que el acceso anónimo está deshabilitado
-ldapsearch -H ldap://localhost:1389 \
-  -b "dc=corporativo,dc=lab" \
-  "(objectClass=organizationalUnit)" ou 2>&1 | grep -E "(result|Operations error|Insufficient)"
-```
-
-**Resultado esperado:** El servidor debe retornar `result: 1 Operations error` o `result: 50 Insufficient access rights`, confirmando que el acceso anónimo está bloqueado.
+LDAP es un protocolo común para consultar directorios. Active Directory implementa servicios de directorio y expone compatibilidad con LDAP, además de integrar autenticación, políticas y administración centralizada.
 
 ---
 
-### Paso 3 — Configurar los recursos LDAP en MidPoint
+#### ¿Sabías que…?
+**Concepto: Esquema de directorio**
 
-**Objetivo:** Registrar LDAP-A y LDAP-B como recursos en MidPoint, definiendo los conectores, credenciales de conexión y el mapeo base de atributos para cada directorio.
+El esquema define qué atributos puede tener una identidad.
 
-#### Instrucciones
+Ejemplo:
 
-**3.1 — Acceder a la interfaz web de MidPoint:**
+- En LDAP, el nombre visible puede estar en `cn`.
+- En Active Directory, el nombre visible puede estar en `displayName`.
 
-Abrir navegador en `http://localhost:8080/midpoint` e iniciar sesión con:
-- Usuario: `administrator`
-- Contraseña: `5ecr3t`
+Aunque representan el mismo dato, los nombres técnicos son diferentes. Por eso se necesitan reglas de mapeo.
 
-**3.2 — Crear el archivo XML de recurso para LDAP-A:**
+---
 
-```bash
-cat > midpoint/resource-ldap-a.xml << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<resource xmlns="http://midpoint.evolveum.com/xml/ns/public/common/common-3"
-          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-          xmlns:icfs="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/resource-schema-3"
-          xmlns:ri="http://midpoint.evolveum.com/xml/ns/public/resource/instance-3"
-          oid="11111111-1111-1111-1111-111111111111">
+### Tarea 2. Validar que Python esté instalado
 
-  <name>LDAP-A Corporativo</name>
-  <description>Directorio corporativo principal - OpenLDAP A</description>
+Antes de crear los archivos del laboratorio, valida que Python y pip estén funcionando(Lo instalamos en Laboratorio 2.3).
 
-  <connectorRef type="ConnectorType">
-    <filter>
-      <q:equal xmlns:q="http://prism.evolveum.com/xml/ns/public/query-3">
-        <q:path>connectorType</q:path>
-        <q:value>com.evolveum.polygon.connector.ldap.LdapConnector</q:value>
-      </q:equal>
-    </filter>
-  </connectorRef>
+Paso 1. Abrir **Windows PowerShell**.
 
-  <connectorConfiguration>
-    <icfs:configurationProperties>
-      <icfc:host xmlns:icfc="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/connector-schema-3">ldap-a</icfc:host>
-      <icfc:port xmlns:icfc="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/connector-schema-3">389</icfc:port>
-      <icfc:baseContext xmlns:icfc="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/connector-schema-3">dc=corporativo,dc=lab</icfc:baseContext>
-      <icfc:bindDn xmlns:icfc="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/connector-schema-3">cn=midpoint-svc,ou=Personas,dc=corporativo,dc=lab</icfc:bindDn>
-      <icfc:bindPassword xmlns:icfc="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/connector-schema-3">
-        <t:clearValue xmlns:t="http://prism.evolveum.com/xml/ns/public/types-3">MidpointSvc2024!</t:clearValue>
-      </icfc:bindPassword>
-      <icfc:usePasswordPolicy xmlns:icfc="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/connector-schema-3">false</icfc:usePasswordPolicy>
-    </icfs:configurationProperties>
-  </connectorConfiguration>
+Paso 2. Ejecutar:
 
-  <schemaHandling>
-    <objectType>
-      <kind>account</kind>
-      <displayName>Cuenta LDAP-A</displayName>
-      <default>true</default>
-      <objectClass>ri:inetOrgPerson</objectClass>
-      <baseContext>
-        <objectClass>ri:organizationalUnit</objectClass>
-        <filter>
-          <q:equal xmlns:q="http://prism.evolveum.com/xml/ns/public/query-3">
-            <q:path>attributes/dn</q:path>
-            <q:value>ou=Personas,dc=corporativo,dc=lab</q:value>
-          </q:equal>
-        </filter>
-      </baseContext>
-      <attribute>
-        <ref>icfs:name</ref>
-        <displayName>DN</displayName>
-        <outbound>
-          <source><path>$user/name</path></source>
-          <expression>
-            <script>
-              <code>'uid=' + name + ',ou=Personas,dc=corporativo,dc=lab'</code>
-            </script>
-          </expression>
-        </outbound>
-      </attribute>
-      <attribute>
-        <ref>ri:uid</ref>
-        <outbound><source><path>$user/name</path></source></outbound>
-        <inbound>
-          <target><path>$user/name</path></target>
-        </inbound>
-      </attribute>
-      <attribute>
-        <ref>ri:mail</ref>
-        <outbound><source><path>$user/emailAddress</path></source></outbound>
-        <inbound>
-          <target><path>$user/emailAddress</path></target>
-        </inbound>
-      </attribute>
-      <attribute>
-        <ref>ri:displayName</ref>
-        <outbound>
-          <source><path>$user/fullName</path></source>
-        </outbound>
-        <inbound>
-          <target><path>$user/fullName</path></target>
-        </inbound>
-      </attribute>
-      <attribute>
-        <ref>ri:sn</ref>
-        <outbound><source><path>$user/familyName</path></source></outbound>
-        <inbound><target><path>$user/familyName</path></target></inbound>
-      </attribute>
-      <attribute>
-        <ref>ri:givenName</ref>
-        <outbound><source><path>$user/givenName</path></source></outbound>
-        <inbound><target><path>$user/givenName</path></target></inbound>
-      </attribute>
-      <correlation>
-        <correlators>
-          <items>
-            <item>
-              <ref>emailAddress</ref>
-            </item>
-          </items>
-        </correlators>
-      </correlation>
-      <synchronization>
-        <reaction>
-          <situation>linked</situation>
-          <actions><synchronize/></actions>
-        </reaction>
-        <reaction>
-          <situation>unlinked</situation>
-          <actions><link/></actions>
-        </reaction>
-        <reaction>
-          <situation>unmatched</situation>
-          <actions><addFocus/></actions>
-        </reaction>
-      </synchronization>
-    </objectType>
-  </schemaHandling>
-</resource>
-EOF
+```powershell
+python --version
 ```
 
-**3.3 — Importar el recurso LDAP-A vía API REST de MidPoint:**
+Resultado esperado:
 
-```bash
-curl -s -u administrator:5ecr3t \
-  -H "Content-Type: application/xml" \
-  -X POST "http://localhost:8080/midpoint/ws/rest/resources" \
-  -d @midpoint/resource-ldap-a.xml \
-  -o /tmp/response-ldap-a.json
-
-cat /tmp/response-ldap-a.json | python3 -m json.tool | grep -E "(oid|message|status)"
+```text
+Python 3.13.14
 ```
 
-**3.4 — Crear y cargar el recurso LDAP-B** con mapeo de transformación para normalizar `cn` (formato `APELLIDO, Nombre`) hacia `fullName` de MidPoint:
+Paso 3. Validar pip:
 
-```bash
-cat > midpoint/resource-ldap-b.xml << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<resource xmlns="http://midpoint.evolveum.com/xml/ns/public/common/common-3"
-          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-          xmlns:icfs="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/resource-schema-3"
-          xmlns:ri="http://midpoint.evolveum.com/xml/ns/public/resource/instance-3"
-          oid="22222222-2222-2222-2222-222222222222">
-
-  <name>LDAP-B Subsidiaria</name>
-  <description>Directorio subsidiaria - OpenLDAP B</description>
-
-  <connectorRef type="ConnectorType">
-    <filter>
-      <q:equal xmlns:q="http://prism.evolveum.com/xml/ns/public/query-3">
-        <q:path>connectorType</q:path>
-        <q:value>com.evolveum.polygon.connector.ldap.LdapConnector</q:value>
-      </q:equal>
-    </filter>
-  </connectorRef>
-
-  <connectorConfiguration>
-    <icfs:configurationProperties>
-      <icfc:host xmlns:icfc="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/connector-schema-3">ldap-b</icfc:host>
-      <icfc:port xmlns:icfc="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/connector-schema-3">389</icfc:port>
-      <icfc:baseContext xmlns:icfc="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/connector-schema-3">dc=subsidiaria,dc=lab</icfc:baseContext>
-      <icfc:bindDn xmlns:icfc="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/connector-schema-3">cn=admin,dc=subsidiaria,dc=lab</icfc:bindDn>
-      <icfc:bindPassword xmlns:icfc="http://midpoint.evolveum.com/xml/ns/public/connector/icf-1/connector-schema-3">
-        <t:clearValue xmlns:t="http://prism.evolveum.com/xml/ns/public/types-3">AdminSubB2024!</t:clearValue>
-      </icfc:bindPassword>
-    </icfs:configurationProperties>
-  </connectorConfiguration>
-
-  <schemaHandling>
-    <objectType>
-      <kind>account</kind>
-      <displayName>Cuenta LDAP-B</displayName>
-      <default>true</default>
-      <objectClass>ri:inetOrgPerson</objectClass>
-      <baseContext>
-        <objectClass>ri:organizationalUnit</objectClass>
-        <filter>
-          <q:equal xmlns:q="http://prism.evolveum.com/xml/ns/public/query-3">
-            <q:path>attributes/dn</q:path>
-            <q:value>ou=Empleados,dc=subsidiaria,dc=lab</q:value>
-          </q:equal>
-        </filter>
-      </baseContext>
-      <attribute>
-        <ref>icfs:name</ref>
-        <outbound>
-          <source><path>$user/name</path></source>
-          <expression>
-            <script>
-              <code>'uid=' + name + ',ou=Empleados,dc=subsidiaria,dc=lab'</code>
-            </script>
-          </expression>
-        </outbound>
-      </attribute>
-      <attribute>
-        <ref>ri:uid</ref>
-        <outbound><source><path>$user/name</path></source></outbound>
-        <inbound><target><path>$user/name</path></target></inbound>
-      </attribute>
-      <attribute>
-        <ref>ri:mail</ref>
-        <outbound><source><path>$user/emailAddress</path></source></outbound>
-        <inbound><target><path>$user/emailAddress</path></target></inbound>
-      </attribute>
-      <!-- Transformación: cn de LDAP-B (formato "APELLIDO, Nombre") → fullName en MidPoint -->
-      <attribute>
-        <ref>ri:cn</ref>
-        <outbound>
-          <source><path>$user/familyName</path></source>
-          <source><path>$user/givenName</path></source>
-          <expression>
-            <script>
-              <code>familyName.toUpperCase() + ', ' + givenName</code>
-            </script>
-          </expression>
-        </outbound>
-        <inbound>
-          <expression>
-            <script>
-              <!-- Convierte "APELLIDO, Nombre" → "Nombre Apellido" para fullName -->
-              <code>
-                def parts = input?.split(', ')
-                if (parts?.size() == 2) {
-                  return parts[1] + ' ' + parts[0].capitalize()
-                }
-                return input
-              </code>
-            </script>
-          </expression>
-          <target><path>$user/fullName</path></target>
-        </inbound>
-      </attribute>
-      <attribute>
-        <ref>ri:sn</ref>
-        <outbound><source><path>$user/familyName</path></source></outbound>
-        <inbound><target><path>$user/familyName</path></target></inbound>
-      </attribute>
-      <attribute>
-        <ref>ri:givenName</ref>
-        <outbound><source><path>$user/givenName</path></source></outbound>
-        <inbound><target><path>$user/givenName</path></target></inbound>
-      </attribute>
-      <correlation>
-        <correlators>
-          <items>
-            <item>
-              <ref>emailAddress</ref>
-            </item>
-          </items>
-        </correlators>
-      </correlation>
-      <synchronization>
-        <reaction>
-          <situation>linked</situation>
-          <actions><synchronize/></actions>
-        </reaction>
-        <reaction>
-          <situation>unlinked</situation>
-          <actions><link/></actions>
-        </reaction>
-        <reaction>
-          <situation>unmatched</situation>
-          <actions><addFocus/></actions>
-        </reaction>
-      </synchronization>
-    </objectType>
-  </schemaHandling>
-</resource>
-EOF
-
-curl -s -u administrator:5ecr3t \
-  -H "Content-Type: application/xml" \
-  -X POST "http://localhost:8080/midpoint/ws/rest/resources" \
-  -d @midpoint/resource-ldap-b.xml \
-  -o /tmp/response-ldap-b.json
-
-cat /tmp/response-ldap-b.json | python3 -m json.tool | grep -E "(oid|message|status)"
+```powershell
+pip --version
 ```
 
-#### Salida Esperada
+Resultado esperado:
 
-```json
-{
-  "oid": "11111111-1111-1111-1111-111111111111"
-}
+```text
+pip 26.1.2
 ```
-*(Para LDAP-A; similar para LDAP-B con OID `22222222-...`)*
 
-#### Verificación
+Si ambos comandos responden correctamente, continúa con la siguiente tarea.
 
-En la interfaz web de MidPoint: **Resources → All Resources** debe mostrar dos recursos:
-- `LDAP-A Corporativo` — Estado: `UP`
-- `LDAP-B Subsidiaria` — Estado: `UP`
+---
 
-Para verificar via REST:
+### Tarea 3. Crear la estructura del laboratorio
 
-```bash
-curl -s -u administrator:5ecr3t \
-  "http://localhost:8080/midpoint/ws/rest/resources?options=noFetch" \
-  | python3 -c "import sys,json; [print(r['name']) for r in json.load(sys.stdin)['object']['object']]"
+En esta tarea crearás la carpeta principal y las subcarpetas donde se guardarán los archivos del laboratorio.
+
+Paso 1. En PowerShell, ir a la unidad `C:\`:
+
+```powershell
+cd C:\
+```
+
+Paso 2. Crear la carpeta general de laboratorios:
+
+```powershell
+New-Item -ItemType Directory -Force -Path C:\labs
+```
+
+Paso 3. Entrar a la carpeta:
+
+```powershell
+cd C:\labs
+```
+
+Paso 4. Crear la carpeta del laboratorio:
+
+```powershell
+New-Item -ItemType Directory -Force -Path .\lab-03-directory-sync
+```
+
+Paso 5. Entrar a la carpeta del laboratorio:
+
+```powershell
+cd .\lab-03-directory-sync
+```
+
+Paso 6. Crear las carpetas internas:
+
+```powershell
+New-Item -ItemType Directory -Force -Path .\data
+New-Item -ItemType Directory -Force -Path .\policy
+New-Item -ItemType Directory -Force -Path .\scripts
+```
+
+Paso 7. Validar la estructura:
+
+```powershell
+dir
+```
+
+Resultado esperado:
+
+![t3p7](../images/Capitulo3/t3p7.png)
+---
+
+#### ¿Sabías que…?
+**Concepto: Estructura del laboratorio**
+
+La práctica usará esta organización:
+
+```text
+lab-03-directory-sync/
+│
+├── data/
+│   ├── ldap_directory.csv
+│   └── active_directory.csv
+│
+├── policy/
+│   └── sync-rules.yaml
+│
+└── scripts/
+    └── sync_rules_lab.py
+```
+
+Cada carpeta cumple una función:
+
+| Carpeta | Función |
+|--------|--------|
+| `data` | Guarda los usuarios simulados |
+| `policy` | Guarda las reglas de sincronización y reconciliación |
+| `scripts` | Guarda el script que compara los datos |
+
+
+---
+
+### Tarea 4. Crear y activar un entorno virtual de Python
+
+En esta tarea crearás un entorno aislado para instalar las librerías del laboratorio.
+
+Paso 1. Crear el entorno virtual:
+
+```powershell
+python -m venv venv
+```
+
+Paso 2. Activar el entorno virtual:
+
+```powershell
+.\venv\Scripts\Activate.ps1
+```
+
+Resultado esperado:
+
+![t4p2](../images/Capitulo3/t4p2.png)
+
+Si PowerShell bloquea la ejecución, ejecutar:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+Cuando pregunte confirmación, escribir:
+
+```text
+Y
+```
+
+Luego volver a ejecutar:
+
+```powershell
+.\venv\Scripts\Activate.ps1
 ```
 
 ---
 
-### Paso 4 — Ejecutar reconciliación inicial y verificar correlación por mail
+#### ¿Sabías que…?
+**Concepto: Entorno virtual**
 
-**Objetivo:** Ejecutar la tarea de reconciliación desde LDAP-A hacia MidPoint para importar usuarios y correlacionarlos por el atributo `mail`. Verificar que los usuarios `amartinez` y `clopez` se correlacionen correctamente entre ambos directorios.
+Un entorno virtual permite instalar librerías solo para este laboratorio, sin afectar la instalación general de Python en la máquina.
 
-#### Instrucciones
-
-**4.1 — Crear y ejecutar tarea de reconciliación para LDAP-A:**
-
-```bash
-cat > midpoint/task-recon-ldap-a.xml << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<task xmlns="http://midpoint.evolveum.com/xml/ns/public/common/common-3"
-      oid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa">
-  <name>Reconciliacion LDAP-A</name>
-  <taskIdentifier>reconciliation-ldap-a-001</taskIdentifier>
-  <ownerRef oid="00000000-0000-0000-0000-000000000002" type="UserType"/>
-  <executionState>runnable</executionState>
-  <schedule>
-    <recurrence>single</recurrence>
-  </schedule>
-  <activity>
-    <work>
-      <reconciliation>
-        <resourceRef oid="11111111-1111-1111-1111-111111111111" type="ResourceType"/>
-        <objectclass>ri:inetOrgPerson</objectclass>
-      </reconciliation>
-    </work>
-  </activity>
-</task>
-EOF
-
-curl -s -u administrator:5ecr3t \
-  -H "Content-Type: application/xml" \
-  -X POST "http://localhost:8080/midpoint/ws/rest/tasks" \
-  -d @midpoint/task-recon-ldap-a.xml
-
-# Esperar 15 segundos para que la tarea complete
-sleep 15
-```
-
-**4.2 — Verificar usuarios importados en MidPoint:**
-
-```bash
-curl -s -u administrator:5ecr3t \
-  "http://localhost:8080/midpoint/ws/rest/users?options=noFetch" \
-  | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-users = data.get('object', {}).get('object', [])
-for u in users:
-    print(f\"Usuario: {u.get('name')} | Email: {u.get('emailAddress','N/A')}\")"
-```
-
-**4.3 — Ejecutar reconciliación para LDAP-B:**
-
-```bash
-cat > midpoint/task-recon-ldap-b.xml << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<task xmlns="http://midpoint.evolveum.com/xml/ns/public/common/common-3"
-      oid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">
-  <name>Reconciliacion LDAP-B</name>
-  <taskIdentifier>reconciliation-ldap-b-001</taskIdentifier>
-  <ownerRef oid="00000000-0000-0000-0000-000000000002" type="UserType"/>
-  <executionState>runnable</executionState>
-  <schedule>
-    <recurrence>single</recurrence>
-  </schedule>
-  <activity>
-    <work>
-      <reconciliation>
-        <resourceRef oid="22222222-2222-2222-2222-222222222222" type="ResourceType"/>
-        <objectclass>ri:inetOrgPerson</objectclass>
-      </reconciliation>
-    </work>
-  </activity>
-</task>
-EOF
-
-curl -s -u administrator:5ecr3t \
-  -H "Content-Type: application/xml" \
-  -X POST "http://localhost:8080/midpoint/ws/rest/tasks" \
-  -d @midpoint/task-recon-ldap-b.xml
-
-sleep 20
-```
-
-#### Salida Esperada
-
-La consulta de usuarios en MidPoint debe mostrar al menos:
-```
-Usuario: amartinez | Email: amartinez@corporativo.lab
-Usuario: clopez    | Email: clopez@corporativo.lab
-Usuario: lrodriguez| Email: lrodriguez@corporativo.lab
-Usuario: ptorres   | Email: ptorres@corporativo.lab
-```
-
-#### Verificación
-
-En la interfaz web de MidPoint: **Users → All Users** debe listar los 4 usuarios. Hacer clic en `amartinez` y verificar que en la sección **Projections** aparezcan dos entradas: una para `LDAP-A Corporativo` y otra para `LDAP-B Subsidiaria`, ambas en estado `LINKED`.
-
-> 💡 **Punto de aprendizaje:** La correlación por `mail` permite que MidPoint identifique que `uid=amartinez,ou=Personas,dc=corporativo,dc=lab` y `uid=amartinez,ou=Empleados,dc=subsidiaria,dc=lab` son la misma identidad, aunque residan en árboles DIT completamente diferentes. Esto implementa el concepto de **correlación de identidades** discutido en el Módulo 3.
+Esto ayuda a mantener cada práctica aislada y controlada.
 
 ---
 
-### Paso 5 — Probar escenario de conflicto y verificar política de resolución
+### Tarea 5. Instalar las librerías necesarias
 
-**Objetivo:** Simular una modificación simultánea del atributo `fullName`/`displayName` en ambos directorios para un mismo usuario, y verificar que la política de resolución de conflictos (LDAP-A tiene prioridad como fuente autoritativa) funciona correctamente.
+En esta tarea instalarás las librerías que usará el script.
 
-#### Instrucciones
+Paso 1. Con el entorno virtual activo, ejecutar:
 
-**5.1 — Introducir el conflicto: modificar `displayName` en LDAP-A y `cn` en LDAP-B para `amartinez`:**
-
-```bash
-# Modificar en LDAP-A (directorio autoritativo)
-cat > /tmp/conflict-ldap-a.ldif << 'EOF'
-dn: uid=amartinez,ou=Personas,dc=corporativo,dc=lab
-changetype: modify
-replace: displayName
-displayName: Andrea Martinez ACTUALIZADO-CORP
-EOF
-
-ldapmodify -H ldap://localhost:1389 \
-  -D "cn=admin,dc=corporativo,dc=lab" \
-  -w "AdminCorpA2024!" \
-  -f /tmp/conflict-ldap-a.ldif
-
-# Modificar en LDAP-B (directorio secundario — valor conflictivo)
-cat > /tmp/conflict-ldap-b.ldif << 'EOF'
-dn: uid=amartinez,ou=Empleados,dc=subsidiaria,dc=lab
-changetype: modify
-replace: cn
-cn: MARTINEZ-CONFLICTO, Andrea
-EOF
-
-ldapmodify -H ldap://localhost:2389 \
-  -D "cn=admin,dc=subsidiaria,dc=lab" \
-  -w "AdminSubB2024!" \
-  -f /tmp/conflict-ldap-b.ldif
+```powershell
+pip install pyyaml tabulate
 ```
 
-**5.2 — Ejecutar reconciliación de LDAP-A (fuente autoritativa) primero:**
+Paso 2. Validar la instalación:
 
-```bash
-# Re-ejecutar reconciliación LDAP-A para que MidPoint tome el valor autoritativo
-curl -s -u administrator:5ecr3t \
-  -H "Content-Type: application/xml" \
-  -X POST "http://localhost:8080/midpoint/ws/rest/tasks" \
-  -d @midpoint/task-recon-ldap-a.xml
-
-sleep 15
+```powershell
+pip list
 ```
 
-**5.3 — Ejecutar reconciliación de LDAP-B para propagar el valor correcto:**
+Debes ver librerías similares a:
 
-```bash
-curl -s -u administrator:5ecr3t \
-  -H "Content-Type: application/xml" \
-  -X POST "http://localhost:8080/midpoint/ws/rest/tasks" \
-  -d @midpoint/task-recon-ldap-b.xml
-
-sleep 20
-```
-
-**5.4 — Verificar el resultado del conflicto en LDAP-B:**
-
-```bash
-ldapsearch -H ldap://localhost:2389 \
-  -D "cn=admin,dc=subsidiaria,dc=lab" \
-  -w "AdminSubB2024!" \
-  -b "ou=Empleados,dc=subsidiaria,dc=lab" \
-  "(uid=amartinez)" cn givenName sn | grep -E "^(cn|givenName|sn):"
-```
-
-#### Salida Esperada
-
-```
-cn: MARTINEZ ACTUALIZADO-CORP, Andrea
-sn: Martinez
-givenName: Andrea
-```
-
-> El valor de `cn` en LDAP-B debe reflejar el dato proveniente de LDAP-A (fuente autoritativa), demostrando que la política de resolución de conflictos funcionó: LDAP-A sobrescribió el valor conflictivo de LDAP-B.
-
-#### Verificación
-
-```bash
-# Verificar también en MidPoint que fullName refleja el valor de LDAP-A
-curl -s -u administrator:5ecr3t \
-  "http://localhost:8080/midpoint/ws/rest/users?query=%7B%22filter%22%3A%7B%22text%22%3A%22amartinez%22%7D%7D" \
-  | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-users = data.get('object',{}).get('object',[])
-for u in users:
-    print(f\"fullName: {u.get('fullName','N/A')}\")"
-```
-
-**Resultado esperado:** `fullName: Andrea Martinez ACTUALIZADO-CORP`
+![t5p2](../images/Capitulo3/t5p2.png)
 
 ---
 
-### Paso 6 — Verificar aprovisionamiento de usuarios únicos entre directorios
+#### ¿Sabías que…?
+**Concepto: PyYAML**
 
-**Objetivo:** Confirmar que `lrodriguez` (solo en LDAP-A) fue aprovisionado en LDAP-B, y que `ptorres` (solo en LDAP-B) fue creado en MidPoint y está disponible para aprovisionamiento en LDAP-A.
+PyYAML permite que Python lea archivos `.yaml`.
 
-#### Instrucciones
+En este laboratorio, el archivo YAML contiene las reglas de sincronización, reconciliación y seguridad.
 
-**6.1 — Verificar que `lrodriguez` fue creado en LDAP-B:**
+---
 
-```bash
-ldapsearch -H ldap://localhost:2389 \
-  -D "cn=admin,dc=subsidiaria,dc=lab" \
-  -w "AdminSubB2024!" \
-  -b "ou=Empleados,dc=subsidiaria,dc=lab" \
-  "(uid=lrodriguez)" uid mail cn
+#### ¿Sabías que…?
+**Concepto: tabulate**
+
+La librería `tabulate` permite imprimir tablas legibles en la consola.
+
+Se usa para mostrar el resumen, el plan de acciones y las alertas de seguridad.
+
+---
+
+### Tarea 6. Crear los datos del directorio LDAP
+
+En esta tarea crearás un archivo CSV que representa el directorio LDAP corporativo.
+
+Paso 1. Ejecutar el siguiente comando:
+
+```powershell
+@"
+uid,cn,mail,departmentNumber,employeeType,accountStatus,passwordPolicy,lastPasswordChange
+atorres,Ana Torres,ana@globalcorp.com,FIN,FTE,active,strong,2026-05-20
+jgarcia,Juan Garcia,juan@globalcorp.com,IT,FTE,active,strong,2026-05-28
+plopez,Pedro Lopez,pedro@globalcorp.com,OPS,FTE,active,weak,2025-12-10
+smartinez,Sofia Martinez,sofia@globalcorp.com,MKT,FTE,active,strong,2026-05-30
+lruiz,Laura Ruiz,laura@globalcorp.com,SALES,Contractor,active,weak,2026-01-15
+"@ | Set-Content -Path .\data\ldap_directory.csv -Encoding UTF8
 ```
 
-**6.2 — Verificar que `ptorres` existe en MidPoint:**
+Paso 2. Validar el contenido:
 
-```bash
-curl -s -u administrator:5ecr3t \
-  "http://localhost:8080/midpoint/ws/rest/users" \
-  | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-users = data.get('object',{}).get('object',[])
-ptorres = [u for u in users if u.get('name') == 'ptorres']
-print('ptorres encontrado:', bool(ptorres))
-if ptorres:
-    print('Email:', ptorres[0].get('emailAddress','N/A'))"
-```
-
-#### Salida Esperada
-
-**Para `lrodriguez` en LDAP-B:**
-```
-dn: uid=lrodriguez,ou=Empleados,dc=subsidiaria,dc=lab
-uid: lrodriguez
-mail: lrodriguez@corporativo.lab
-cn: RODRIGUEZ, Laura
-```
-
-**Para `ptorres` en MidPoint:**
-```
-ptorres encontrado: True
-Email: ptorres@corporativo.lab
+```powershell
+type .\data\ldap_directory.csv
 ```
 
 ---
 
-## 7. Validación y Pruebas
+#### ¿Sabías que…?
+**Concepto: LDAP**
 
-### Lista de Verificación de Completitud
+LDAP es un protocolo usado para consultar y administrar información en servicios de directorio.
 
-Ejecutar el siguiente script de validación integral:
-
-```bash
-#!/bin/bash
-# Script de validación Lab 03-00-01
-echo "=== VALIDACIÓN LAB 03-00-01 ==="
-PASS=0; FAIL=0
-
-check() {
-  local desc="$1"; local cmd="$2"; local expected="$3"
-  result=$(eval "$cmd" 2>&1)
-  if echo "$result" | grep -q "$expected"; then
-    echo "  ✅ PASS: $desc"
-    ((PASS++))
-  else
-    echo "  ❌ FAIL: $desc"
-    echo "     Resultado: $result"
-    ((FAIL++))
-  fi
-}
-
-echo ""
-echo "── Verificando contenedores activos ──"
-check "ldap-a corriendo" "docker ps --filter name=ldap-a --format '{{.Status}}'" "Up"
-check "ldap-b corriendo" "docker ps --filter name=ldap-b --format '{{.Status}}'" "Up"
-check "midpoint corriendo" "docker ps --filter name=midpoint --format '{{.Status}}'" "Up"
-
-echo ""
-echo "── Verificando acceso anónimo bloqueado en LDAP-A ──"
-check "Anónimo bloqueado LDAP-A" \
-  "ldapsearch -H ldap://localhost:1389 -b 'dc=corporativo,dc=lab' '(objectClass=*)' 2>&1" \
-  "Operations error\|Insufficient access\|result: 1\|result: 50"
-
-echo ""
-echo "── Verificando usuarios en LDAP-A ──"
-check "amartinez en LDAP-A" \
-  "ldapsearch -H ldap://localhost:1389 -D 'cn=admin,dc=corporativo,dc=lab' -w 'AdminCorpA2024!' -b 'ou=Personas,dc=corporativo,dc=lab' '(uid=amartinez)' uid 2>&1" \
-  "uid: amartinez"
-check "lrodriguez en LDAP-A" \
-  "ldapsearch -H ldap://localhost:1389 -D 'cn=admin,dc=corporativo,dc=lab' -w 'AdminCorpA2024!' -b 'ou=Personas,dc=corporativo,dc=lab' '(uid=lrodriguez)' uid 2>&1" \
-  "uid: lrodriguez"
-
-echo ""
-echo "── Verificando sincronización en LDAP-B ──"
-check "amartinez en LDAP-B" \
-  "ldapsearch -H ldap://localhost:2389 -D 'cn=admin,dc=subsidiaria,dc=lab' -w 'AdminSubB2024!' -b 'ou=Empleados,dc=subsidiaria,dc=lab' '(uid=amartinez)' uid 2>&1" \
-  "uid: amartinez"
-check "lrodriguez aprovisionado en LDAP-B" \
-  "ldapsearch -H ldap://localhost:2389 -D 'cn=admin,dc=subsidiaria,dc=lab' -w 'AdminSubB2024!' -b 'ou=Empleados,dc=subsidiaria,dc=lab' '(uid=lrodriguez)' uid 2>&1" \
-  "uid: lrodriguez"
-
-echo ""
-echo "── Verificando resolución de conflicto ──"
-check "Valor autoritativo en LDAP-B post-conflicto" \
-  "ldapsearch -H ldap://localhost:2389 -D 'cn=admin,dc=subsidiaria,dc=lab' -w 'AdminSubB2024!' -b 'ou=Empleados,dc=subsidiaria,dc=lab' '(uid=amartinez)' cn 2>&1" \
-  "ACTUALIZADO-CORP"
-
-echo ""
-echo "── Verificando ppolicy cargado ──"
-check "ppolicy overlay activo" \
-  "docker exec ldap-a ldapsearch -Y EXTERNAL -H ldapi:/// -b 'cn=config' '(objectClass=olcPPolicyConfig)' olcOverlay 2>&1" \
-  "olcOverlay: ppolicy"
-
-echo ""
-echo "═══════════════════════════════════════"
-echo "  RESULTADO: $PASS pasaron | $FAIL fallaron"
-echo "═══════════════════════════════════════"
-```
-
-```bash
-chmod +x validate-lab.sh && bash validate-lab.sh
-```
-
-**Resultado esperado:** `RESULTADO: 10 pasaron | 0 fallaron`
+En este laboratorio, LDAP representa un directorio corporativo usado por aplicaciones internas.
 
 ---
 
-## 8. Resolución de Problemas
+### Tarea 7. Crear los datos de Active Directory
 
-### Problema 1: La reconciliación de MidPoint falla con error "Cannot connect to resource"
+En esta tarea crearás un archivo CSV que representa el directorio Active Directory.
 
-**Síntomas:**
-- En la interfaz de MidPoint, la tarea de reconciliación muestra estado `FATAL_ERROR`.
-- El log muestra: `com.evolveum.midpoint.util.exception.CommunicationException: Cannot connect to resource LDAP-A Corporativo`.
-- El recurso aparece con estado `DOWN` en la lista de recursos.
+Paso 1. Ejecutar:
 
-**Causa:**
-MidPoint intenta conectarse a `ldap-a` usando el nombre de host del servicio Docker, pero si el contenedor MidPoint no está en la misma red Docker (`iam-net`) que los contenedores LDAP, la resolución DNS interna falla. Esto puede ocurrir si los contenedores se iniciaron en momentos diferentes o si el archivo `docker-compose.yml` fue modificado.
+```powershell
+@"
+sAMAccountName,displayName,mail,department,employeeType,enabled,passwordPolicy,lastPasswordChange
+atorres,Ana Torres,ana@globalcorp.com,FIN,FTE,true,strong,2026-05-20
+jgarcia,Juan Garcia,juan@globalcorp.com,IT,FTE,true,strong,2026-05-28
+plopez,Pedro Lopez,pedro@globalcorp.com,HR,FTE,true,strong,2026-05-29
+smartinez,Sofia Martinez,sofia@globalcorp.com,MKT,Contractor,true,strong,2026-05-30
+mrojas,Mario Rojas,mario@globalcorp.com,SUPPORT,Contractor,true,strong,2026-06-01
+"@ | Set-Content -Path .\data\active_directory.csv -Encoding UTF8
+```
 
-**Solución:**
+Paso 2. Validar el contenido:
 
-```bash
-# 1. Verificar que todos los contenedores están en la misma red
-docker network inspect iam-net --format '{{range .Containers}}{{.Name}} {{end}}'
-# Debe mostrar: mp-postgres ldap-a ldap-b midpoint
-
-# 2. Si algún contenedor no aparece, reconectarlo
-docker network connect iam-net midpoint
-docker network connect iam-net ldap-a
-docker network connect iam-net ldap-b
-
-# 3. Verificar resolución DNS desde MidPoint hacia ldap-a
-docker exec midpoint ping -c 2 ldap-a
-
-# 4. Si el ping falla, reiniciar el stack completo
-docker compose down && docker compose up -d
-sleep 90
-
-# 5. Probar conexión LDAP desde dentro del contenedor MidPoint
-docker exec midpoint bash -c \
-  "apt-get install -y ldap-utils -qq && \
-   ldapsearch -H ldap://ldap-a:389 \
-   -D 'cn=midpoint-svc,ou=Personas,dc=corporativo,dc=lab' \
-   -w 'MidpointSvc2024!' \
-   -b 'dc=corporativo,dc=lab' '(objectClass=*)' dn 2>&1 | head -5"
+```powershell
+type .\data\active_directory.csv
 ```
 
 ---
 
-### Problema 2: El overlay ppolicy no aplica la política y los usuarios pueden usar contraseñas cortas
+#### ¿Sabías que…?
+**Concepto: Active Directory**
 
-**Síntomas:**
-- Al intentar cambiar la contraseña de un usuario a un valor de 4 caracteres, la operación tiene éxito en lugar de ser rechazada.
-- El comando `ldapsearch` sobre `cn=config` no muestra la entrada `olcOverlay=ppolicy`.
-- Los logs de `slapd` muestran: `overlay "ppolicy" not found`.
+Active Directory es un servicio de directorio de Microsoft usado para administrar usuarios, grupos, equipos, políticas y autenticación dentro de una organización.
 
-**Causa:**
-El módulo `ppolicy` no fue cargado correctamente porque el archivo `.so` no está disponible en la imagen Docker `osixia/openldap:1.5.0`, o el módulo fue cargado pero la ruta de la política por defecto en `olcPPolicyDefault` no corresponde a una entrada existente en el DIT (la OU `ou=Politicas` no se creó antes del overlay).
+En este laboratorio, Active Directory se trata como el sistema principal para ciertos atributos.
 
-**Solución:**
 
-```bash
-# 1. Verificar que el módulo ppolicy está disponible en el contenedor
-docker exec ldap-a find /usr/lib -name "ppolicy.so" 2>/dev/null
+---
 
-# 2. Verificar que la OU de políticas existe
-docker exec ldap-a ldapsearch \
-  -H ldap://localhost \
-  -D "cn=admin,dc=corporativo,dc=lab" \
-  -w "AdminCorpA2024!" \
-  -b "dc=corporativo,dc=lab" \
-  "(ou=Politicas)" dn
+### Tarea 8. Crear la política de sincronización y reconciliación
 
-# 3. Si la OU no existe, crearla primero
-docker exec ldap-a bash -c "cat > /tmp/fix-policy-ou.ldif << 'LDIF'
-dn: ou=Politicas,dc=corporativo,dc=lab
-objectClass: organizationalUnit
-ou: Politicas
-LDIF
-ldapadd -H ldap://localhost \
-  -D 'cn=admin,dc=corporativo,dc=lab' \
-  -w 'AdminCorpA2024!' \
-  -f /tmp/fix-policy-ou.ldif"
+En esta tarea crearás el archivo YAML que define las reglas de decisión.
 
-# 4. Verificar que el overlay está registrado en cn=config
-docker exec ldap-a ldapsearch \
-  -Y EXTERNAL -H ldapi:/// \
-  -b "olcDatabase={1}mdb,cn=config" \
-  "(objectClass=olcPPolicyConfig)" olcOverlay olcPPolicyDefault
+Paso 1. Ejecutar:
 
-# 5. Probar la política manualmente
-docker exec ldap-a ldappasswd \
-  -H ldap://localhost \
-  -D "cn=admin,dc=corporativo,dc=lab" \
-  -w "AdminCorpA2024!" \
-  -s "abc" \
-  "uid=amartinez,ou=Personas,dc=corporativo,dc=lab"
-# Debe retornar: Result: Constraint violation (19) - Password fails quality checking policy
+```powershell
+@"
+metadata:
+  policy_name: "globalcorp-directory-sync-rules"
+  version: "1.0"
+  description: "Reglas de sincronizacion y reconciliacion entre LDAP y Active Directory simulados"
+
+correlation:
+  key_attribute: "mail"
+  matching_strategy: "exact_match"
+
+attribute_mapping:
+  login:
+    ldap_attr: "uid"
+    ad_attr: "sAMAccountName"
+    sync_direction: "ad_to_ldap"
+    on_conflict: "alert"
+
+  display_name:
+    ldap_attr: "cn"
+    ad_attr: "displayName"
+    sync_direction: "ad_to_ldap"
+    on_conflict: "use_active_directory"
+
+  email:
+    ldap_attr: "mail"
+    ad_attr: "mail"
+    sync_direction: "bidirectional"
+    on_conflict: "alert"
+
+  department:
+    ldap_attr: "departmentNumber"
+    ad_attr: "department"
+    sync_direction: "ad_to_ldap"
+    on_conflict: "use_active_directory"
+
+  employee_type:
+    ldap_attr: "employeeType"
+    ad_attr: "employeeType"
+    sync_direction: "manual_review"
+    on_conflict: "alert"
+
+  account_status:
+    ldap_attr: "accountStatus"
+    ad_attr: "enabled"
+    sync_direction: "ad_to_ldap"
+    on_conflict: "use_active_directory"
+
+reconciliation_policy:
+  only_in_ldap:
+    action: "alert"
+    reason: "La identidad existe solo en LDAP. Puede ser una cuenta legacy, huerfana o de un usuario dado de baja."
+
+  only_in_active_directory:
+    action: "create_in_ldap"
+    reason: "La identidad existe en Active Directory pero no en LDAP. Puede requerir aprovisionamiento en aplicaciones legacy."
+
+  identical:
+    action: "no_action"
+    reason: "La identidad esta sincronizada."
+
+  conflicting:
+    action: "apply_attribute_rules"
+    reason: "Existen diferencias de atributos. Se aplican reglas de sincronizacion por atributo."
+
+security_policy:
+  minimum_password_policy: "strong"
+  max_password_age_days: 180
+  weak_password_action: "alert"
+  old_password_action: "alert"
+
+execution:
+  dry_run: true
+"@ | Set-Content -Path .\policy\sync-rules.yaml -Encoding UTF8
+```
+
+Paso 2. Validar el archivo:
+
+```powershell
+type .\policy\sync-rules.yaml
 ```
 
 ---
 
-## 9. Limpieza del Entorno
+#### ¿Sabías que…?
+**Concepto: Correlación**
 
-> ⚠️ **Importante:** Ejecutar la limpieza completa antes de iniciar el siguiente laboratorio para liberar recursos de memoria y almacenamiento.
+La correlación permite determinar si una identidad en LDAP y una identidad en Active Directory representan a la misma persona.
 
-```bash
-# Desde el directorio ~/lab-03-00-01
+En este laboratorio se usa el atributo `mail`.
 
-# 1. Detener y eliminar todos los contenedores y volúmenes del lab
-docker compose down -v
+Ejemplo:
 
-# 2. Eliminar imágenes descargadas (opcional, solo si se necesita espacio)
-docker rmi osixia/openldap:1.5.0 evolveum/midpoint:4.8 postgres:15 2>/dev/null || true
-
-# 3. Limpiar archivos temporales generados durante el lab
-rm -rf /tmp/conflict-ldap-*.ldif \
-       /tmp/load-ppolicy.ldif \
-       /tmp/ppolicy-overlay.ldif \
-       /tmp/create-policy.ldif \
-       /tmp/acl-hardening.ldif \
-       /tmp/midpoint-svc.ldif \
-       /tmp/response-ldap-*.json
-
-# 4. Verificar que no quedan contenedores activos del lab
-docker ps --filter "name=ldap-a" --filter "name=ldap-b" \
-          --filter "name=midpoint" --filter "name=mp-postgres"
-
-# 5. (Opcional) Conservar archivos de configuración para referencia futura
-tar -czf ~/backup-lab-03-00-01-$(date +%Y%m%d).tar.gz ~/lab-03-00-01/
-echo "Backup guardado en ~/backup-lab-03-00-01-$(date +%Y%m%d).tar.gz"
-```
-
-**Resultado esperado de limpieza:**
-```
-[+] Running 5/5
- ✔ Container midpoint     Removed
- ✔ Container ldap-b       Removed
- ✔ Container ldap-a       Removed
- ✔ Container mp-postgres  Removed
- ✔ Network iam-net        Removed
+```text
+pedro@globalcorp.com en LDAP = pedro@globalcorp.com en Active Directory
 ```
 
 ---
 
-## 10. Resumen
+#### ¿Sabías que…?
+**Concepto: Mapeo de atributos**
 
-### Conceptos Aplicados en este Laboratorio
+El mapeo permite relacionar atributos equivalentes con nombres diferentes.
 
-En este laboratorio aplicaste de forma práctica los conceptos centrales del Módulo 3 sobre sincronización y reconciliación de identidades:
+Ejemplo:
 
-| Concepto | Implementación Realizada |
-|----------|--------------------------|
-| **Arquitectura DIT diferenciada** | LDAP-A usó `ou=Personas` con `displayName`; LDAP-B usó `ou=Empleados` con `cn` en formato distinto |
-| **Correlación de identidades** | Regla de correlación por atributo `mail` en MidPoint para identificar usuarios equivalentes entre directorios |
-| **Transformación de atributos** | Mapping Groovy que convierte `"APELLIDO, Nombre"` ↔ `"Nombre Apellido"` entre esquemas |
-| **Resolución de conflictos** | LDAP-A establecido como fuente autoritativa; su valor sobrescribe datos conflictivos en LDAP-B |
-| **Hardening LDAP** | ACLs restrictivas, deshabilitación de acceso anónimo, cuenta de servicio con privilegios mínimos |
-| **Política de contraseñas** | Overlay `ppolicy` con longitud mínima 10, historial de 5 contraseñas, bloqueo tras 5 intentos fallidos |
-| **Aprovisionamiento bidireccional** | `lrodriguez` (solo en LDAP-A) fue aprovisionado en LDAP-B; `ptorres` (solo en LDAP-B) fue importado a MidPoint |
+```text
+LDAP: cn
+Active Directory: displayName
+```
 
-### Puntos Clave
-
-- Los **esquemas LDAP heterogéneos** son la norma en entornos empresariales reales; MidPoint resuelve estas diferencias mediante mappings de transformación expresados en Groovy.
-- La **correlación por atributo estable** (como `mail`) es fundamental: usar atributos que cambien con frecuencia (como `cn`) genera correlaciones incorrectas.
-- El **overlay ppolicy** de OpenLDAP es la herramienta estándar para aplicar políticas de contraseñas directamente en el directorio, independientemente de la aplicación que realice el cambio.
-- Las **ACLs restrictivas** y la deshabilitación del bind anónimo son medidas de hardening de bajo costo y alto impacto, alineadas con las buenas prácticas de la lección 3.1.
-
-### Recursos Adicionales
-
-- [MidPoint 4.8 Documentation — Synchronization](https://docs.evolveum.com/midpoint/reference/synchronization/)
-- [MidPoint Correlation — Official Guide](https://docs.evolveum.com/midpoint/reference/synchronization/correlation/)
-- [OpenLDAP Password Policy Overlay (ppolicy)](https://www.openldap.org/software/man.cgi?query=slapo-ppolicy)
-- [RFC 3112 — LDAP Authentication Password Schema](https://www.rfc-editor.org/rfc/rfc3112)
-- [OpenLDAP Admin Guide — Access Control](https://www.openldap.org/doc/admin24/access-control.html)
-- [MidPoint Groovy Scripting in Mappings](https://docs.evolveum.com/midpoint/reference/expressions/expressions/script/groovy/)
+Ambos pueden representar el nombre visible del usuario.
 
 ---
-*Lab 03-00-01 — Módulo 3: Sincronización y Reconciliación de Identidades | Versión 1.0*
+
+#### ¿Sabías que…?
+**Concepto: Regla de conflicto**
+
+Una regla de conflicto define qué acción tomar cuando los valores no coinciden.
+
+Ejemplo:
+
+```text
+LDAP: departmentNumber = OPS
+Active Directory: department = HR
+```
+
+La política puede indicar que Active Directory tiene prioridad.
+
+---
+
+### Tarea 9. Crear el script de sincronización y reconciliación
+
+En esta tarea crearás el script Python que compara usuarios, aplica reglas y genera un reporte.
+
+Paso 1. Ejecutar:
+
+```powershell
+@'
+import csv
+import yaml
+from datetime import datetime
+from tabulate import tabulate
+
+LDAP_FILE = "data/ldap_directory.csv"
+AD_FILE = "data/active_directory.csv"
+POLICY_FILE = "policy/sync-rules.yaml"
+
+TODAY = datetime(2026, 6, 13)
+
+def read_csv(path):
+    with open(path, "r", encoding="utf-8-sig") as file:
+        rows = csv.DictReader(file)
+        return {row["mail"].strip().lower(): row for row in rows}
+
+def read_policy(path):
+    with open(path, "r", encoding="utf-8-sig") as file:
+        return yaml.safe_load(file)
+
+def days_since(date_text):
+    date_value = datetime.strptime(date_text, "%Y-%m-%d")
+    return (TODAY - date_value).days
+
+policy = read_policy(POLICY_FILE)
+ldap = read_csv(LDAP_FILE)
+ad = read_csv(AD_FILE)
+
+attribute_mapping = policy["attribute_mapping"]
+security_policy = policy["security_policy"]
+
+only_ldap = []
+only_ad = []
+identical = []
+conflicts = []
+security_alerts = []
+
+all_users = sorted(set(ldap.keys()) | set(ad.keys()))
+
+for mail in all_users:
+    in_ldap = mail in ldap
+    in_ad = mail in ad
+
+    if in_ldap and not in_ad:
+        only_ldap.append(mail)
+
+    elif in_ad and not in_ldap:
+        only_ad.append(mail)
+
+    else:
+        user_conflicts = []
+
+        for rule_name, rule in attribute_mapping.items():
+            ldap_attr = rule["ldap_attr"]
+            ad_attr = rule["ad_attr"]
+
+            ldap_value = ldap[mail][ldap_attr]
+            ad_value = ad[mail][ad_attr]
+
+            if rule_name == "account_status":
+                ad_value = "active" if ad_value.lower() == "true" else "disabled"
+
+            if ldap_value != ad_value:
+                user_conflicts.append([
+                    mail,
+                    rule_name,
+                    ldap_attr,
+                    ldap_value,
+                    ad_attr,
+                    ad_value,
+                    rule["on_conflict"]
+                ])
+
+        if user_conflicts:
+            conflicts.extend(user_conflicts)
+        else:
+            identical.append(mail)
+
+for mail, user in ldap.items():
+    if user["passwordPolicy"].lower() != security_policy["minimum_password_policy"]:
+        security_alerts.append([
+            mail,
+            "LDAP",
+            "Politica de password debil",
+            f"passwordPolicy={user['passwordPolicy']}",
+            security_policy["weak_password_action"]
+        ])
+
+    age = days_since(user["lastPasswordChange"])
+    if age > security_policy["max_password_age_days"]:
+        security_alerts.append([
+            mail,
+            "LDAP",
+            "Password antigua",
+            f"{age} dias desde ultimo cambio",
+            security_policy["old_password_action"]
+        ])
+
+for mail, user in ad.items():
+    if user["passwordPolicy"].lower() != security_policy["minimum_password_policy"]:
+        security_alerts.append([
+            mail,
+            "Active Directory",
+            "Politica de password debil",
+            f"passwordPolicy={user['passwordPolicy']}",
+            security_policy["weak_password_action"]
+        ])
+
+    age = days_since(user["lastPasswordChange"])
+    if age > security_policy["max_password_age_days"]:
+        security_alerts.append([
+            mail,
+            "Active Directory",
+            "Password antigua",
+            f"{age} dias desde ultimo cambio",
+            security_policy["old_password_action"]
+        ])
+
+action_plan = []
+
+for mail in only_ldap:
+    action_plan.append([
+        mail,
+        "Solo en LDAP",
+        policy["reconciliation_policy"]["only_in_ldap"]["action"],
+        "Revisar cuenta legacy, huerfana o posible baja"
+    ])
+
+for mail in only_ad:
+    action_plan.append([
+        mail,
+        "Solo en Active Directory",
+        policy["reconciliation_policy"]["only_in_active_directory"]["action"],
+        "Crear usuario en LDAP si requiere apps legacy"
+    ])
+
+for mail in identical:
+    action_plan.append([
+        mail,
+        "Sincronizado",
+        policy["reconciliation_policy"]["identical"]["action"],
+        "No se requieren cambios"
+    ])
+
+for item in conflicts:
+    mail = item[0]
+    rule_name = item[1]
+    ldap_attr = item[2]
+    ldap_value = item[3]
+    ad_attr = item[4]
+    ad_value = item[5]
+    action = item[6]
+
+    if action == "use_active_directory":
+        detail = f"Actualizar LDAP {ldap_attr}: {ldap_value} -> {ad_value}"
+    elif action == "alert":
+        detail = f"Revisar conflicto {rule_name}: LDAP={ldap_value}, AD={ad_value}"
+    else:
+        detail = f"Aplicar regla {action}"
+
+    action_plan.append([
+        mail,
+        "Conflicto",
+        action,
+        detail
+    ])
+
+print()
+print("REPORTE DE SINCRONIZACION Y RECONCILIACION DE DIRECTORIOS")
+print("=" * 75)
+print(f"Politica: {policy['metadata']['policy_name']}")
+print(f"Version: {policy['metadata']['version']}")
+print(f"Modo dry-run: {policy['execution']['dry_run']}")
+print("=" * 75)
+
+summary = [
+    ["Solo en LDAP", len(only_ldap)],
+    ["Solo en Active Directory", len(only_ad)],
+    ["Sincronizados", len(identical)],
+    ["Conflictos de datos", len(conflicts)],
+    ["Alertas de seguridad", len(security_alerts)]
+]
+
+print()
+print("RESUMEN")
+print(tabulate(summary, headers=["Categoria", "Cantidad"], tablefmt="grid"))
+
+print()
+print("PLAN DE ACCIONES")
+print(tabulate(action_plan, headers=["Usuario", "Categoria", "Accion", "Detalle"], tablefmt="grid"))
+
+print()
+print("ALERTAS DE SEGURIDAD")
+print(tabulate(security_alerts, headers=["Usuario", "Directorio", "Hallazgo", "Detalle", "Accion"], tablefmt="grid"))
+
+print()
+print("LECTURA DEL RESULTADO")
+print("- Usuarios solo en Active Directory representan posibles altas que deben aprovisionarse en LDAP.")
+print("- Usuarios solo en LDAP pueden ser cuentas legacy, huerfanas o usuarios dados de baja.")
+print("- Los conflictos muestran diferencias entre atributos equivalentes de LDAP y Active Directory.")
+print("- Las alertas de seguridad muestran politicas de contrasena debiles o contrasenas antiguas.")
+'@ | Set-Content -Path .\scripts\sync_rules_lab.py -Encoding UTF8
+```
+
+Paso 2. Validar que el archivo fue creado:
+
+```powershell
+dir .\scripts
+```
+
+Resultado esperado:
+
+![t9](../images/Capitulo3/t9.png)
+
+
+---
+
+### Tarea 10. Ejecutar el laboratorio
+
+En esta tarea ejecutarás el script y revisarás el resultado.
+
+Paso 1. Ejecutar:
+
+```powershell
+python .\scripts\sync_rules_lab.py
+```
+
+Paso 2. Revisar el encabezado del reporte.
+
+Resultado esperado:
+
+```text
+REPORTE DE SINCRONIZACION Y RECONCILIACION DE DIRECTORIOS
+===========================================================================
+Politica: globalcorp-directory-sync-rules
+Version: 1.0
+Modo dry-run: True
+===========================================================================
+```
+
+Paso 3. Revisar el resumen generado.
+
+Resultado esperado:
+
+```text
++--------------------------+------------+
+| Categoria                |   Cantidad |
++==========================+============+
+| Solo en LDAP             |          1 |
+| Solo en Active Directory |          1 |
+| Sincronizados            |          2 |
+| Conflictos de datos      |          3 |
+| Alertas de seguridad     |          3 |
++--------------------------+------------+
+```
+
+---
+
+#### ¿Sabías que…?
+**Concepto: Dry run**
+
+`dry_run` significa que el script simula las acciones, pero no modifica ningún sistema.
+
+En un entorno real, este modo permite revisar qué cambios se aplicarían antes de ejecutarlos.
+
+---
+
+## Interpretación del laboratorio
+
+### Usuarios solo en LDAP
+
+Usuario detectado:
+
+```text
+laura@globalcorp.com
+```
+
+Interpretación:
+
+Este usuario existe en LDAP, pero no existe en Active Directory.
+
+Acción:
+
+```text
+alert
+```
+
+Esto puede indicar una cuenta legacy, huérfana o un posible usuario dado de baja.
+
+---
+
+### Usuarios solo en Active Directory
+
+Usuario detectado:
+
+```text
+mario@globalcorp.com
+```
+
+Interpretación:
+
+Este usuario existe en Active Directory, pero no existe en LDAP.
+
+Acción:
+
+```text
+create_in_ldap
+```
+
+Esto representa un caso de aprovisionamiento hacia LDAP.
+
+---
+
+### Usuarios sincronizados
+
+Usuarios detectados:
+
+```text
+ana@globalcorp.com
+juan@globalcorp.com
+```
+
+Interpretación:
+
+Estos usuarios existen en ambos repositorios y sus atributos equivalentes coinciden.
+
+Acción:
+
+```text
+no_action
+```
+
+No se requieren cambios.
+
+---
+
+### Usuarios con conflictos de datos
+
+Usuarios detectados:
+
+```text
+pedro@globalcorp.com
+sofia@globalcorp.com
+```
+
+Pedro tiene conflicto en el departamento:
+
+```text
+LDAP: departmentNumber = OPS
+Active Directory: department = HR
+```
+
+Acción esperada:
+
+```text
+use_active_directory
+```
+
+Esto significa que Active Directory tiene prioridad para el atributo `department`.
+
+Sofía tiene conflicto en el tipo de empleado:
+
+```text
+LDAP: employeeType = FTE
+Active Directory: employeeType = Contractor
+```
+
+Acción esperada:
+
+```text
+alert
+```
+
+Este dato requiere revisión manual porque puede afectar permisos y accesos.
+
+---
+
+### Alertas de seguridad
+
+El reporte también identifica problemas relacionados con contraseñas.
+
+Casos esperados:
+
+| Usuario | Directorio | Hallazgo |
+|--------|------------|----------|
+| `pedro@globalcorp.com` | LDAP | Política de password débil |
+| `pedro@globalcorp.com` | LDAP | Password antigua |
+| `laura@globalcorp.com` | LDAP | Política de password débil |
+
+---
+
+## Actividad de cierre
+
+Responde las siguientes preguntas:
+
+1. ¿Qué atributo se usa para correlacionar usuarios entre LDAP y Active Directory?
+2. ¿Qué usuario existe solo en LDAP?
+3. ¿Qué usuario existe solo en Active Directory?
+4. ¿Qué usuarios están sincronizados?
+5. ¿Qué usuario tiene conflicto de departamento?
+6. ¿Qué usuario tiene conflicto de tipo de empleado?
+7. ¿Por qué `employeeType` requiere alerta?
+8. ¿Qué usuario tiene política de contraseña débil?
+9. ¿Qué usuario tiene contraseña antigua?
+10. ¿Qué significa `dry_run`?
+
+---
+
+## Respuestas esperadas
+
+1. El atributo `mail`.
+2. `laura@globalcorp.com`.
+3. `mario@globalcorp.com`.
+4. `ana@globalcorp.com` y `juan@globalcorp.com`.
+5. `pedro@globalcorp.com`.
+6. `sofia@globalcorp.com`.
+7. Porque el tipo de empleado puede afectar permisos y accesos.
+8. `pedro@globalcorp.com` y `laura@globalcorp.com` en LDAP.
+9. `pedro@globalcorp.com` en LDAP.
+10. Que el script simula acciones, pero no modifica ningún sistema.
+
+---
+
+## Conclusiones
+
+En este laboratorio se simuló un proceso de sincronización y reconciliación entre LDAP y Active Directory.
+
+### Puntos clave aprendidos
+
+- LDAP y Active Directory pueden almacenar datos equivalentes usando atributos con nombres distintos.
+- El mapeo de atributos permite comparar valores entre esquemas diferentes.
+- La correlación por correo permite identificar la misma identidad en ambos repositorios.
+- La reconciliación permite detectar usuarios faltantes, cuentas legacy y conflictos de datos.
+- Las reglas de conflicto ayudan a decidir cuándo actualizar automáticamente y cuándo alertar.
+- Active Directory puede funcionar como fuente de verdad para ciertos atributos, como departamento.
+- Atributos sensibles como `employeeType` requieren revisión manual.
+- Las políticas de contraseñas y la antigüedad de contraseñas son parte del hardening del directorio.
+- El modo `dry_run` permite revisar las acciones antes de aplicarlas en un entorno real.
+
+Este laboratorio demuestra que sincronizar directorios no consiste únicamente en copiar usuarios. También implica entender esquemas, reglas, fuentes de verdad, conflictos y controles de seguridad.
+
+### Fin del laboratorio 3.4
